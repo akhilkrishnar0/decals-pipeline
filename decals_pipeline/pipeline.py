@@ -44,10 +44,7 @@ class DecalsPipeline:
 
     # ---------- DOWNLOAD ----------
     def download(self, target, size=1200):
-        try:
-            from decals_query import DECaLSQuery
-        except ImportError as exc:
-            raise ImportError("Downloads require your original decals_query.py (DECaLSQuery), which was not supplied. Existing-data splitting does not require it.") from exc
+        from .query import DECaLSQuery
         g = self.clean_name(target)
 
         coord = self.get_coord(target)
@@ -56,8 +53,30 @@ class DecalsPipeline:
         print(f"⬇ Downloading {g}")
         query.query_region(coord, size=size, download_type='all', galid=g)
 
+    def _check_image_invvar(self, target):
+        name = self.clean_name(target)
+        with fits.open(self.download_dir / 'fits' / f'{name}.fits') as images, fits.open(self.download_dir / 'invvar' / f'{name}_invvar.fits') as inv:
+            cube = images[0].data
+            if cube is None or cube.ndim != 3 or cube.shape[0] != 3:
+                raise ValueError('Expected primary image cube (3, ny, nx), ordered g/r/z')
+            if len(inv) != 7:
+                raise ValueError('Expected one image/INVVAR pair per g/r/z band (7 HDUs). Multiple-brick subimages require explicit selection or mosaicking.')
+            wcs = WCS(images[0].header).celestial
+            yy, xx = np.meshgrid(np.linspace(0, cube.shape[1]-1, 3), np.linspace(0, cube.shape[2]-1, 3), indexing='ij')
+            for band, index in zip(('g', 'r', 'z'), (2, 4, 6)):
+                hdu = inv[index]
+                label = str(hdu.header.get('BAND', hdu.header.get('FILTER', band))).strip().lower()
+                if label != band:
+                    raise ValueError(f'Unexpected band in inverse-variance HDU {index}: {label}')
+                if hdu.data is None or hdu.data.shape != cube.shape[1:]:
+                    raise ValueError(f'{band} image/inverse-variance shapes differ; native subimages cannot be used as aligned resampled maps')
+                ix, iy = WCS(hdu.header).celestial.world_to_pixel(wcs.pixel_to_world(xx, yy))
+                if not (np.allclose(ix, xx, rtol=0, atol=1e-3) and np.allclose(iy, yy, rtol=0, atol=1e-3)):
+                    raise ValueError(f'{band} image/inverse-variance WCS mismatch. Use matched native products or a documented variance-resampling procedure.')
+
     # ---------- LOAD ----------
     def load_data(self, target):
+        self._check_image_invvar(target)
         g = self.clean_name(target)
 
         fits_file   = self.download_dir / "fits" / f"{g}.fits"
@@ -160,7 +179,7 @@ class DecalsPipeline:
         with fits.open(path) as hdul:
             planes = [h for h in hdul if h.data is not None and h.data.ndim == 2]
             if len(planes) != 3:
-                raise ValueError("Expected three 2-D PSF HDUs in g/r/z order; supply the downloader to confirm other layouts")
+                raise ValueError("Expected three 2-D PSF HDUs in g/r/z order; inspect the FITS headers to identify other layouts")
             return [h.data.copy() for h in planes], [h.header.copy() for h in planes]
 
     @staticmethod
@@ -174,6 +193,7 @@ class DecalsPipeline:
         return result
 
     def save_split_data(self, target):
+        self._check_image_invvar(target)
         g = self.clean_name(target)
         bands = ["g","r","z"]
     

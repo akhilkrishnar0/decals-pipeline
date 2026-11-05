@@ -1,2 +1,3 @@
 from .pipeline import DecalsPipeline
-__version__ = "0.1.0"
+from .query import DECaLSQuery
+__version__ = "0.2.0"
